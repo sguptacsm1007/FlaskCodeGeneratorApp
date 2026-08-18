@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  # Local fast key-value state store for tracking pipeline status milestones
+  state-broker:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Local GCP Cloud Engine Emulator (Pub/Sub & GCS) handling everything on port 4588
+  floci-gcp:
+    image: floci/floci-gcp:latest
+    ports:
+      - "4588:4588"
+    environment:
+      - FLOCI_GCP_HOSTNAME=floci-gcp
+      - FLOCI_GCP_STORAGE_MODE=memory # Fast in-memory state tracking
+
+  # Producer Engine: Continually triggers dynamic requests using a LiteLLM generation loop
+  ui-producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    depends_on:
+      floci-gcp:
+        condition: service_started
+      state-broker:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=state-broker
+      - PUBSUB_EMULATOR_HOST=floci-gcp:4588
+      - GOOGLE_CLOUD_PROJECT=floci-local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Consumer Engine: Runs Dual-Stage Llama calls and uploads dynamic multi-file blocks to Floci GCS
+  ui-consumer:
+    build:
+      context: ./consumer
+      dockerfile: Dockerfile
+    depends_on:
+      floci-gcp:
+        condition: service_started
+      state-broker:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=state-broker
+      - PUBSUB_EMULATOR_HOST=floci-gcp:4588
+      - STORAGE_EMULATOR_HOST=http://floci-gcp:4588
+      - GOOGLE_CLOUD_PROJECT=floci-local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Minimalist Tabular Operations Center Dashboard & Project Bundle Packer
+  ui-dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      state-broker:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=state-broker
+      - STORAGE_EMULATOR_HOST=http://floci-gcp:4588
+      - GOOGLE_CLOUD_PROJECT=floci-local
